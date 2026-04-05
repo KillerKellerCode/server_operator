@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .events import JobEvent, JobEventType
 from .schemas import utc_now_z
-from .storage import RunPaths
+from .storage import RunPaths, append_event
 
 
 def _job_id_from_paths(paths: RunPaths) -> str:
@@ -79,3 +80,31 @@ def append_llm_response(
     }
     return _append_jsonl(path, record)
 
+
+def append_structured_log_event(
+    paths: RunPaths,
+    level: str,
+    message: str,
+    job_id: str,
+    group_id: str | None = None,
+    task_id: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> JobEvent:
+    """Append a human log line plus a structured JobEvent and return the event."""
+    normalized_level = level.upper()
+    append_run_log(paths, normalized_level, message, task_id=task_id)
+    if task_id is not None:
+        append_task_log(paths, task_id, normalized_level, message)
+
+    payload = dict(data or {})
+    payload["level"] = normalized_level
+    event = JobEvent(
+        event_type=JobEventType.log_message,
+        job_id=job_id,
+        group_id=group_id,
+        task_id=task_id,
+        message=message,
+        data=payload,
+    )
+    append_event(paths, event)
+    return event

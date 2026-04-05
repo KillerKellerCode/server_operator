@@ -3,34 +3,38 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from operatorapp.cli import main
-from operatorapp.schemas import JobRecord, JobStatus, utc_now_z
+from operatorapp.schemas import JobRecord, JobStatus
 
 
 def _job(status: JobStatus) -> JobRecord:
-    now = utc_now_z()
     return JobRecord(
         id="jobabcd1",
         user_prompt="hello world",
         summary="summary",
         status=status,
-        tasks=[],
-        created_at=now,
-        updated_at=now,
+        task_groups=[],
     )
 
 
-def test_cli_wiring_happy_path(monkeypatch, capsys) -> None:
-    calls: dict[str, object] = {}
-
-    fake_config = SimpleNamespace(
+def _config() -> SimpleNamespace:
+    return SimpleNamespace(
         operator_home="/tmp/runs",
         openai_api_key="test-key",
         planner_model="planner-model",
         shell_model="shell-model",
         codex_command="codex",
         codex_bypass_approvals=False,
-        command_timeout_seconds=600,
+        default_command_timeout_seconds=600,
+        max_command_timeout_seconds=7200,
+        default_codex_timeout_seconds=7200,
+        max_concurrent_tasks=4,
+        max_concurrent_codex_tasks=1,
     )
+
+
+def test_cli_wiring_happy_path(monkeypatch, capsys) -> None:
+    calls: dict[str, object] = {}
+    fake_config = _config()
     monkeypatch.setattr("operatorapp.cli.load_config", lambda: fake_config)
 
     class FakeOpenAIJSONClient:
@@ -80,16 +84,7 @@ def test_cli_wiring_happy_path(monkeypatch, capsys) -> None:
 
 
 def test_cli_keyboard_interrupt_returns_130(monkeypatch, capsys) -> None:
-    fake_config = SimpleNamespace(
-        operator_home="/tmp/runs",
-        openai_api_key="test-key",
-        planner_model="planner-model",
-        shell_model="shell-model",
-        codex_command="codex",
-        codex_bypass_approvals=False,
-        command_timeout_seconds=600,
-    )
-    monkeypatch.setattr("operatorapp.cli.load_config", lambda: fake_config)
+    monkeypatch.setattr("operatorapp.cli.load_config", _config)
     monkeypatch.setattr("operatorapp.cli.OpenAIJSONClient", lambda model, api_key=None: object())
     monkeypatch.setattr("operatorapp.cli.PlannerService", lambda llm: object())
     monkeypatch.setattr("operatorapp.cli.ShellTaskExecutor", lambda llm, config: object())
@@ -112,16 +107,7 @@ def test_cli_keyboard_interrupt_returns_130(monkeypatch, capsys) -> None:
 
 
 def test_cli_failed_job_returns_1(monkeypatch) -> None:
-    fake_config = SimpleNamespace(
-        operator_home="/tmp/runs",
-        openai_api_key="test-key",
-        planner_model="planner-model",
-        shell_model="shell-model",
-        codex_command="codex",
-        codex_bypass_approvals=False,
-        command_timeout_seconds=600,
-    )
-    monkeypatch.setattr("operatorapp.cli.load_config", lambda: fake_config)
+    monkeypatch.setattr("operatorapp.cli.load_config", _config)
     monkeypatch.setattr("operatorapp.cli.OpenAIJSONClient", lambda model, api_key=None: object())
     monkeypatch.setattr("operatorapp.cli.PlannerService", lambda llm: object())
     monkeypatch.setattr("operatorapp.cli.ShellTaskExecutor", lambda llm, config: object())
@@ -135,5 +121,38 @@ def test_cli_failed_job_returns_1(monkeypatch) -> None:
             return _job(JobStatus.failed)
 
     monkeypatch.setattr("operatorapp.cli.OperatorApp", FakeOperatorApp)
-
     assert main(["hello world"]) == 1
+
+
+def test_cli_missing_api_key_returns_nonzero(monkeypatch) -> None:
+    config = _config()
+    config.openai_api_key = "   "
+    monkeypatch.setattr("operatorapp.cli.load_config", lambda: config)
+    assert main(["hello world"]) == 2
+
+
+def test_cli_config_failure_returns_nonzero(monkeypatch) -> None:
+    def fail_load():
+        raise RuntimeError("bad config")
+
+    monkeypatch.setattr("operatorapp.cli.load_config", fail_load)
+    assert main(["hello world"]) == 2
+
+
+def test_cli_runtime_exception_returns_nonzero(monkeypatch) -> None:
+    monkeypatch.setattr("operatorapp.cli.load_config", _config)
+    monkeypatch.setattr("operatorapp.cli.OpenAIJSONClient", lambda model, api_key=None: object())
+    monkeypatch.setattr("operatorapp.cli.PlannerService", lambda llm: object())
+    monkeypatch.setattr("operatorapp.cli.ShellTaskExecutor", lambda llm, config: object())
+    monkeypatch.setattr("operatorapp.cli.CodexTaskExecutor", lambda config: object())
+
+    class FakeOperatorApp:
+        def __init__(self, planner, shell_executor, codex_executor, config) -> None:
+            pass
+
+        def run(self, user_prompt: str) -> JobRecord:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("operatorapp.cli.OperatorApp", FakeOperatorApp)
+    assert main(["hello world"]) == 1
+

@@ -38,7 +38,7 @@ def test_constructor_stores_model(monkeypatch) -> None:
 
 
 def test_complete_json_returns_requested_model_type(monkeypatch) -> None:
-    parsed = JobPlanResponse(summary="Simple plan", tasks=[])
+    parsed = JobPlanResponse(summary="Simple plan", groups=[])
     fake = _FakeOpenAI(_FakeParsedResponse(output_parsed=parsed))
     monkeypatch.setattr(
         "operatorapp.openai_client.OpenAI",

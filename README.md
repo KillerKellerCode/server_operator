@@ -1,34 +1,79 @@
 # Operator
 
-Operator is a sequential local server agent CLI.
-You run `operator "prompt"` and Operator plans a job, executes tasks in order, and persists logs and state locally.
+Operator is a local Python CLI agent that plans and executes work as a dependency-aware task graph.
 
 ## CLI Usage
 
 ```bash
-operator "hello world"
+operator "your prompt"
+python -m operatorapp.cli "your prompt"
 ```
 
-Direct module form:
+## V2 Runtime Model
 
-```bash
-python -m operatorapp.cli "hello world"
-```
+V2 runs jobs as ordered task groups with explicit dependencies:
 
-## Architecture
+- A job has `task_groups`.
+- A group becomes runnable when all `depends_on_group_ids` are complete.
+- Tasks inside a ready group can run concurrently.
+- Groups can overlap in time; there are no stage barriers.
+- Fail-fast task failures can terminate the group/job early.
 
-- `PlannerService` turns a user prompt into an ordered `JobRecord` + `TaskRecord` list.
-- `OperatorApp` executes tasks strictly by ascending `task_index`.
-- `ShellTaskExecutor` handles `TaskKind.shell` by iterating with LLM-guided shell steps and command-history feedback.
-- `CodexTaskExecutor` handles `TaskKind.codex` by delegating to `codex exec` as a black-box worker.
-- `storage` and `logging_utils` persist all job/task state and human-readable logs under one run directory.
+This replaces the old V1 flat `for task in ordered_tasks` execution model.
 
-## On-Disk Run Layout
+## Task Kinds
+
+Current task kinds:
+
+- `shell_command`
+- `codex_project`
+- `codex_modify`
+- `download_file`
+- `filesystem_create`
+- `filesystem_mutate`
+- `read_file`
+- `write_file`
+- `append_file`
+- `patch_file`
+- `extract_archive`
+- `git_repo`
+- `process_wait`
+
+## Codex vs Native vs Shell
+
+- `codex_project`: Codex owns workspace setup, scaffold, implementation, dependency install, tests/validation within task scope.
+- `codex_modify`: Codex performs targeted in-place modifications to an existing codebase.
+- Native task kinds (`download_file`, filesystem/file I/O/archive/git/wait) are explicit Python executors for deterministic operations.
+- `shell_command` is a narrower fallback for true shell needs, not a catch-all for common local operations.
+
+## Timeout Semantics
+
+Shell command timeout resolution (highest priority first):
+
+1. Planner action override (`ShellStepAction.timeout_seconds`)
+2. `ShellCommandPayload.timeout_seconds`
+3. `TaskRecord.timeout_seconds`
+4. `OperatorConfig.default_command_timeout_seconds`
+
+The final value is capped by `OperatorConfig.max_command_timeout_seconds`.
+
+Codex task timeout:
+
+- `TaskRecord.timeout_seconds` if set
+- otherwise `OperatorConfig.default_codex_timeout_seconds`
+
+## Run Directory Layout
+
+Each run is persisted under:
 
 ```
 <operator_home>/<job_id>/
   job.json
+  events.jsonl
   run.log
+  groups/
+    <group_id>/
+      group.json
   tasks/
     <task_id>/
       task.json
@@ -37,51 +82,12 @@ python -m operatorapp.cli "hello world"
       llm_responses.jsonl
 ```
 
-## Example Prompt
+- `events.jsonl` is append-only structured event history for future UI/daemon consumers.
+- `run.log` and `task.log` remain human-readable operational logs.
 
-`operator "Set up a Python scraper project, then implement a parser module with tests."`
+## Configuration (`config.json`)
 
-## Example Planned Tasks
-
-```text
-1. shell  - Create project directory and virtualenv
-2. shell  - Install required dependencies
-3. codex  - Implement parser module and tests
-```
-
-## Example Shell Task History Object
-
-```json
-{
-  "timestamp": "2026-04-02T18:22:10Z",
-  "sequential": true,
-  "actions": [
-    {
-      "action_type": "shell_command",
-      "shell_command": "mkdir -p src",
-      "output": "",
-      "stderr": "",
-      "exit_code": 0
-    }
-  ]
-}
-```
-
-## Example Codex Task Description
-
-```text
-Title: Implement parser
-Kind: codex
-Instructions: Add parser module, wire CLI integration, and update tests.
-Workdir: /home/user/project
-Test policy: always
-```
-
-## Configuration
-
-Operator loads runtime settings from project-root `config.json`.
-
-Default `config.json`:
+Operator reads config from project-root `config.json`.
 
 ```json
 {
@@ -91,28 +97,26 @@ Default `config.json`:
   "shell_model": "gpt-4.1-mini",
   "codex_command": "codex",
   "codex_bypass_approvals": false,
-  "command_timeout_seconds": 600
+  "default_command_timeout_seconds": 600,
+  "max_command_timeout_seconds": 7200,
+  "default_codex_timeout_seconds": 7200,
+  "max_concurrent_tasks": 4,
+  "max_concurrent_codex_tasks": 1
 }
 ```
 
-Set `openai_api_key` in `config.json` to enable live OpenAI-backed planning/execution.
+## V3 Direction (Not Implemented Yet)
 
-## Task Types
+V2 prepares for V3 by persisting structured events and keeping scheduler/executor boundaries clear.
 
-- `shell` tasks: local shell-command work (filesystem, installs, downloads, software invocation).
-- `codex` tasks: delegated coding work executed through Codex CLI.
+Not implemented in V2:
 
-## v1 Limitations
+- Web UI
+- Daemon/service mode
+- Distributed worker system
+- Database backend
 
-- Sequential execution only (no concurrency).
-- No retries framework.
-- No background daemon mode.
-- No web UI or database.
-- LLM-dependent planning/execution requires live API access.
-- Shell task adaptation is single-threaded and step-wise only.
-- Codex execution is treated as opaque process output (no fine-grained event parsing).
-
-## Run Tests
+## Running Tests
 
 ```bash
 ./venv/bin/python -m pytest

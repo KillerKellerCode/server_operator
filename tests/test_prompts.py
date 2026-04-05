@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from operatorapp.prompts import (
     build_codex_task_prompt,
     build_job_planner_system_prompt,
@@ -10,69 +8,104 @@ from operatorapp.prompts import (
     build_shell_step_user_prompt,
 )
 from operatorapp.schemas import (
-    ActionRecord,
-    TaskExchange,
     TaskKind,
     TaskRecord,
     TestPolicy as TaskTestPolicy,
-    utc_now_z,
+    make_group_id,
+    make_task_id,
+)
+from operatorapp.task_payloads import (
+    CodexModifyPayload,
+    CodexProjectPayload,
+    ShellCommandPayload,
 )
 
 
-def _make_task(test_policy: TaskTestPolicy = TaskTestPolicy.auto) -> TaskRecord:
+def _make_shell_task() -> TaskRecord:
+    job_id = "jobabcd1"
+    group_index = 0
     return TaskRecord(
-        id="jobabcd1_t001",
-        parent_job_id="jobabcd1",
-        task_index=1,
-        title="Implement parser",
-        kind=TaskKind.codex,
-        instructions="Create parser module and wire CLI.",
+        id=make_task_id(job_id, group_index, 0),
+        parent_job_id=job_id,
+        parent_group_id=make_group_id(job_id, group_index),
+        group_index=group_index,
+        task_index=0,
+        title="Run shell command",
+        kind=TaskKind.shell_command,
+        workdir="/tmp/project",
+        timeout_seconds=900,
+        payload=ShellCommandPayload(command="python -m pytest -q"),
+    )
+
+
+def _make_codex_project_task(test_policy: TaskTestPolicy = TaskTestPolicy.auto) -> TaskRecord:
+    job_id = "jobabcd1"
+    group_index = 1
+    return TaskRecord(
+        id=make_task_id(job_id, group_index, 0),
+        parent_job_id=job_id,
+        parent_group_id=make_group_id(job_id, group_index),
+        group_index=group_index,
+        task_index=0,
+        title="Create new parser project",
+        kind=TaskKind.codex_project,
         workdir="/tmp/project",
         test_policy=test_policy,
-        history=[
-            TaskExchange(
-                timestamp=utc_now_z(),
-                sequential=True,
-                actions=[
-                    ActionRecord(
-                        action_type="shell_command",
-                        shell_command="ls -la",
-                        output="total 8",
-                        stderr="",
-                        exit_code=0,
-                    )
-                ],
-            )
-        ],
+        payload=CodexProjectPayload(
+            objective="Scaffold and implement parser package",
+            workspace_root="/tmp/project",
+            test_command="pytest -q",
+        ),
+    )
+
+
+def _make_codex_modify_task(test_policy: TaskTestPolicy = TaskTestPolicy.auto) -> TaskRecord:
+    job_id = "jobabcd1"
+    group_index = 2
+    return TaskRecord(
+        id=make_task_id(job_id, group_index, 0),
+        parent_job_id=job_id,
+        parent_group_id=make_group_id(job_id, group_index),
+        group_index=group_index,
+        task_index=0,
+        title="Modify parser behavior",
+        kind=TaskKind.codex_modify,
+        workdir="/tmp/project",
+        test_policy=test_policy,
+        payload=CodexModifyPayload(
+            objective="Modify parser in place",
+            workspace_root="/tmp/project",
+            target_paths=["parser.py"],
+            test_command="pytest tests/test_parser.py -q",
+        ),
     )
 
 
 def test_job_planner_system_prompt_contains_required_phrases() -> None:
-    prompt = build_job_planner_system_prompt()
-    assert "convert one user request into an ordered job plan" in prompt.lower()
-    assert "output JSON matching JobPlanResponse" in prompt
-    assert "choose between shell and codex tasks" in prompt.lower()
-    assert "keep the number of tasks low" in prompt.lower()
-    assert "default to shell tasks for installs, file ops, downloads, and running software" in prompt.lower()
-    assert "default to codex tasks for writing or modifying code" in prompt.lower()
-    assert "sequential and dependency-aware" in prompt.lower()
-    assert "set workdir when a directory is obvious" in prompt.lower()
-    assert "always for code that should definitely be tested" in prompt.lower()
-    assert "never for docs-only work" in prompt.lower()
-    assert "auto otherwise" in prompt.lower()
-    assert "valid JSON types and fields from JobPlanResponse" in prompt
+    prompt = build_job_planner_system_prompt().lower()
+    assert "output json matching jobplanresponse" in prompt
+    assert "ordered task groups" in prompt
+    assert "dependency graph" in prompt
+    assert "prefer native typed task kinds" in prompt
+    assert "use codex_project when creating a coding project/workspace from scratch" in prompt
+    assert "use codex_modify for targeted code changes in an existing codebase" in prompt
+    assert "set payload.kind and ensure it exactly matches the task kind" in prompt
+    assert "required payload fields by kind" in prompt
+    assert "- git_repo: operation, repo_path" in prompt
+    assert "default shell timeout is 600 seconds unless overridden" in prompt
+    assert "likely long-running actions" in prompt
+    assert "request a larger timeout_seconds" in prompt
+    assert "low-count, concrete, executable groups and tasks" in prompt
 
 
-def test_shell_step_system_prompt_contains_required_phrases() -> None:
-    prompt = build_shell_step_system_prompt()
-    assert "output JSON matching ShellStepResponse" in prompt
-    assert "propose only the next commands needed" in prompt.lower()
-    assert "adapt to previous command outputs" in prompt.lower()
-    assert "mark complete when the task objective is satisfied" in prompt.lower()
-    assert "mark failed only when the task cannot reasonably proceed" in prompt.lower()
-    assert "minimal and idempotent" in prompt.lower()
-    assert "avoid explanations outside json" in prompt.lower()
-    assert "valid JSON types and fields from ShellStepResponse" in prompt
+def test_shell_step_system_prompt_contains_timeout_rules() -> None:
+    prompt = build_shell_step_system_prompt(default_timeout_seconds=600, max_timeout_seconds=3600).lower()
+    assert "shell_command tasks only" in prompt
+    assert "output json matching shellstepresponse" in prompt
+    assert "default per-command timeout is 600 seconds" in prompt
+    assert "never exceed 3600 seconds" in prompt
+    assert "you may set action.timeout_seconds when justified" in prompt
+    assert "fewer concrete commands" in prompt
 
 
 def test_job_planner_user_prompt_mentions_schema() -> None:
@@ -82,31 +115,30 @@ def test_job_planner_user_prompt_mentions_schema() -> None:
 
 
 def test_shell_step_user_prompt_includes_history_and_authoritative_reminder() -> None:
-    task = _make_task()
+    task = _make_shell_task()
     prompt = build_shell_step_user_prompt(task)
 
     assert f"Task id: {task.id}" in prompt
-    assert f"Task instructions: {task.instructions}" in prompt
+    assert f"Task kind: {task.kind.value}" in prompt
     assert f"Task workdir: {task.workdir}" in prompt
+    assert "Task timeout_seconds override: 900" in prompt
+    assert "Task history (compact JSON): []" in prompt
     assert "History is authoritative and must be treated as the source of truth." in prompt
 
-    expected_history = json.dumps(
-        [exchange.model_dump(mode="json") for exchange in task.history],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    assert f"Task history (compact JSON): {expected_history}" in prompt
 
+def test_codex_task_prompt_differs_for_project_vs_modify_and_respects_test_policy() -> None:
+    project_prompt = build_codex_task_prompt(_make_codex_project_task(TaskTestPolicy.always))
+    modify_prompt = build_codex_task_prompt(_make_codex_modify_task(TaskTestPolicy.never))
+    auto_prompt = build_codex_task_prompt(_make_codex_modify_task(TaskTestPolicy.auto))
 
-def test_codex_task_prompt_respects_test_policy() -> None:
-    always_prompt = build_codex_task_prompt(_make_task(TaskTestPolicy.always))
-    never_prompt = build_codex_task_prompt(_make_task(TaskTestPolicy.never))
-    auto_prompt = build_codex_task_prompt(_make_task(TaskTestPolicy.auto))
+    assert "Task kind: codex_project" in project_prompt
+    assert "You own coding-project workspace setup end-to-end for this task." in project_prompt
+    assert "scaffold creation, implementation, dependency install, and validation" in project_prompt
+    assert "Test behavior: run tests for this task before finishing." in project_prompt
+    assert "Acceptance criteria:" in project_prompt
 
-    assert "Objective: Create parser module and wire CLI." in always_prompt
-    assert "Stay within this task scope" in always_prompt
-    assert "Use this task workdir as the project root: /tmp/project" in always_prompt
-    assert "Run tests for this task before finishing." in always_prompt
-    assert "Do not run tests for this task." in never_prompt
-    assert "Run only the most relevant tests for this task." in auto_prompt
-    assert "Summarize files changed and final validation status." in auto_prompt
+    assert "Task kind: codex_modify" in modify_prompt
+    assert "Modify the existing project in place." in modify_prompt
+    assert "Do not re-scaffold or restructure unrelated areas." in modify_prompt
+    assert "Test behavior: do not run tests for this task." in modify_prompt
+    assert "Test behavior: run only the most relevant tests for this task." in auto_prompt
